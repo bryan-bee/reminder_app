@@ -1,8 +1,8 @@
-import 'dart:math';
-
 import 'package:flutter/material.dart';
 
-import 'affirmations.dart';
+import 'custom_reminder.dart';
+import 'custom_reminders_store.dart';
+import 'interval_schedule_editor.dart';
 import 'notification_service.dart';
 import 'reminder_settings.dart';
 
@@ -15,9 +15,8 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   ReminderSettings? _settings;
+  List<CustomReminder> _customReminders = [];
   final _notifications = NotificationService.instance;
-
-  static const List<int> _intervalOptions = [1, 2, 3, 4, 6];
 
   @override
   void initState() {
@@ -28,8 +27,14 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _bootstrap() async {
     await _notifications.requestPermissions();
     final settings = await ReminderSettings.load();
-    setState(() => _settings = settings);
+    final customReminders = await CustomRemindersStore.load();
+    setState(() {
+      _settings = settings;
+      _customReminders = customReminders;
+    });
+    await _refreshWaterIfNewDay(settings);
     await _refreshAffirmationIfNewDay(settings);
+    await _refreshCustomRemindersIfNewDay();
   }
 
   String _todayKey() {
@@ -37,48 +42,58 @@ class _HomeScreenState extends State<HomeScreen> {
     return '${now.year}-${now.month}-${now.day}';
   }
 
+  Future<void> _refreshWaterIfNewDay(ReminderSettings settings) async {
+    if (!settings.waterEnabled) return;
+    if (settings.waterLastScheduledDay == _todayKey()) return;
+    await _rescheduleWater(settings);
+  }
+
+  Future<void> _rescheduleWater(ReminderSettings settings) async {
+    await _notifications.scheduleWaterReminders(
+      allDay: settings.waterAllDay,
+      startHour: settings.waterStartHour,
+      endHour: settings.waterEndHour,
+      intervalHours: settings.waterIntervalHours,
+    );
+    settings.waterLastScheduledDay = _todayKey();
+    await settings.save();
+  }
+
   Future<void> _refreshAffirmationIfNewDay(ReminderSettings settings) async {
     if (!settings.affirmationEnabled) return;
-    final today = _todayKey();
-    if (settings.affirmationLastScheduledDay == today) return;
+    if (settings.affirmationLastScheduledDay == _todayKey()) return;
+    await _rescheduleAffirmation(settings);
+  }
 
-    final affirmation = affirmations[Random().nextInt(affirmations.length)];
-    await _notifications.scheduleAffirmationReminder(
-      hour: settings.affirmationHour,
-      minute: settings.affirmationMinute,
-      affirmationText: affirmation,
+  Future<void> _rescheduleAffirmation(ReminderSettings settings) async {
+    await _notifications.scheduleAffirmationReminders(
+      allDay: settings.affirmationAllDay,
+      startHour: settings.affirmationStartHour,
+      endHour: settings.affirmationEndHour,
+      intervalHours: settings.affirmationIntervalHours,
     );
-    settings.affirmationLastScheduledDay = today;
+    settings.affirmationLastScheduledDay = _todayKey();
     await settings.save();
   }
 
   Future<void> _onWaterToggled(bool enabled) async {
     final settings = _settings!;
     settings.waterEnabled = enabled;
-    await settings.save();
     if (enabled) {
-      await _notifications.scheduleWaterReminders(
-        allDay: settings.waterAllDay,
-        startHour: settings.waterStartHour,
-        endHour: settings.waterEndHour,
-        intervalHours: settings.waterIntervalHours,
-      );
+      await _rescheduleWater(settings);
     } else {
       await _notifications.cancelWaterReminders();
+      await settings.save();
     }
     setState(() {});
   }
 
   Future<void> _onWaterConfigChanged() async {
     final settings = _settings!;
-    await settings.save();
     if (settings.waterEnabled) {
-      await _notifications.scheduleWaterReminders(
-        allDay: settings.waterAllDay,
-        startHour: settings.waterStartHour,
-        endHour: settings.waterEndHour,
-        intervalHours: settings.waterIntervalHours,
-      );
+      await _rescheduleWater(settings);
+    } else {
+      await settings.save();
     }
     setState(() {});
   }
@@ -87,70 +102,219 @@ class _HomeScreenState extends State<HomeScreen> {
     final settings = _settings!;
     settings.affirmationEnabled = enabled;
     if (enabled) {
-      final affirmation = affirmations[Random().nextInt(affirmations.length)];
-      await _notifications.scheduleAffirmationReminder(
-        hour: settings.affirmationHour,
-        minute: settings.affirmationMinute,
-        affirmationText: affirmation,
-      );
-      settings.affirmationLastScheduledDay = _todayKey();
+      await _rescheduleAffirmation(settings);
     } else {
-      await _notifications.cancelAffirmationReminder();
-    }
-    await settings.save();
-    setState(() {});
-  }
-
-  Future<void> _onAffirmationTimeChanged() async {
-    final settings = _settings!;
-    await settings.save();
-    if (settings.affirmationEnabled) {
-      final affirmation = affirmations[Random().nextInt(affirmations.length)];
-      await _notifications.scheduleAffirmationReminder(
-        hour: settings.affirmationHour,
-        minute: settings.affirmationMinute,
-        affirmationText: affirmation,
-      );
-      settings.affirmationLastScheduledDay = _todayKey();
+      await _notifications.cancelAffirmationReminders();
       await settings.save();
     }
     setState(() {});
   }
 
-  Future<void> _pickAffirmationTime() async {
+  Future<void> _onAffirmationConfigChanged() async {
     final settings = _settings!;
-    final picked = await showTimePicker(
-      context: context,
-      initialTime:
-          TimeOfDay(hour: settings.affirmationHour, minute: settings.affirmationMinute),
+    if (settings.affirmationEnabled) {
+      await _rescheduleAffirmation(settings);
+    } else {
+      await settings.save();
+    }
+    setState(() {});
+  }
+
+  Future<void> _saveCustomReminders() async {
+    await CustomRemindersStore.saveAll(_customReminders);
+  }
+
+  Future<void> _refreshCustomRemindersIfNewDay() async {
+    final today = _todayKey();
+    var changed = false;
+    for (final reminder in _customReminders) {
+      if (!reminder.enabled) continue;
+      if (reminder.lastScheduledDay == today) continue;
+      await _scheduleCustom(reminder);
+      changed = true;
+    }
+    if (changed) await _saveCustomReminders();
+  }
+
+  Future<void> _addCustomReminder() async {
+    final result = await _showCustomReminderDialog();
+    if (result == null) return;
+    final baseId = await CustomRemindersStore.nextBaseId();
+    final reminder = CustomReminder(
+      baseId: baseId,
+      title: result.title,
+      message: result.message,
+      allDay: result.allDay,
+      startHour: result.startHour,
+      endHour: result.endHour,
+      intervalHours: result.intervalHours,
+      enabled: true,
     );
-    if (picked == null) return;
-    settings.affirmationHour = picked.hour;
-    settings.affirmationMinute = picked.minute;
-    await _onAffirmationTimeChanged();
+    setState(() => _customReminders.add(reminder));
+    await _scheduleCustom(reminder);
+    await _saveCustomReminders();
+  }
+
+  Future<void> _editCustomReminder(CustomReminder reminder) async {
+    final result = await _showCustomReminderDialog(existing: reminder);
+    if (result == null) return;
+    setState(() {
+      reminder.title = result.title;
+      reminder.message = result.message;
+      reminder.allDay = result.allDay;
+      reminder.startHour = result.startHour;
+      reminder.endHour = result.endHour;
+      reminder.intervalHours = result.intervalHours;
+    });
+    if (reminder.enabled) {
+      await _scheduleCustom(reminder);
+    }
+    await _saveCustomReminders();
+  }
+
+  Future<void> _scheduleCustom(CustomReminder reminder) async {
+    await _notifications.scheduleCustomReminder(
+      baseId: reminder.baseId,
+      title: reminder.title,
+      message: reminder.message,
+      allDay: reminder.allDay,
+      startHour: reminder.startHour,
+      endHour: reminder.endHour,
+      intervalHours: reminder.intervalHours,
+    );
+    reminder.lastScheduledDay = _todayKey();
+  }
+
+  Future<void> _toggleCustomReminder(CustomReminder reminder, bool enabled) async {
+    setState(() => reminder.enabled = enabled);
+    if (enabled) {
+      await _scheduleCustom(reminder);
+    } else {
+      await _notifications.cancelCustomReminder(reminder.baseId);
+    }
+    await _saveCustomReminders();
+  }
+
+  Future<void> _deleteCustomReminder(CustomReminder reminder) async {
+    await _notifications.cancelCustomReminder(reminder.baseId);
+    setState(() => _customReminders.remove(reminder));
+    await _saveCustomReminders();
+  }
+
+  Future<void> _fireTest(Future<void> Function() action) async {
+    await action();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Test notification sent 🧪')),
+      );
+    }
+  }
+
+  String _scheduleSummary(
+      {required bool allDay,
+      required int startHour,
+      required int endHour,
+      required int intervalHours}) {
+    if (intervalHours == testingOneMinuteInterval) {
+      return '1 min (test)';
+    }
+    final window = allDay ? 'all day' : '$startHour:00–$endHour:00';
+    return 'Every $intervalHours hr, $window';
+  }
+
+  Future<_CustomReminderInput?> _showCustomReminderDialog({
+    CustomReminder? existing,
+  }) async {
+    final titleController = TextEditingController(text: existing?.title ?? '');
+    final messageController =
+        TextEditingController(text: existing?.message ?? '');
+    bool allDay = existing?.allDay ?? false;
+    int startHour = existing?.startHour ?? 8;
+    int endHour = existing?.endHour ?? 20;
+    int intervalHours = existing?.intervalHours ?? 4;
+
+    return showDialog<_CustomReminderInput>(
+      context: context,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (dialogContext, setDialogState) {
+            return AlertDialog(
+              title: Text(existing == null ? 'New reminder' : 'Edit reminder'),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    TextField(
+                      controller: titleController,
+                      decoration: const InputDecoration(
+                        labelText: 'Title',
+                        hintText: 'e.g. Take medication',
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: messageController,
+                      decoration: const InputDecoration(
+                        labelText: 'Message',
+                        hintText: 'e.g. 💊 Time for your meds!',
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    IntervalScheduleEditor(
+                      enabled: true,
+                      allDay: allDay,
+                      startHour: startHour,
+                      endHour: endHour,
+                      intervalHours: intervalHours,
+                      onAllDayChanged: (value) =>
+                          setDialogState(() => allDay = value),
+                      onStartHourChanged: (value) =>
+                          setDialogState(() => startHour = value),
+                      onEndHourChanged: (value) =>
+                          setDialogState(() => endHour = value),
+                      onIntervalHoursChanged: (value) =>
+                          setDialogState(() => intervalHours = value),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: () {
+                    final title = titleController.text.trim();
+                    final message = messageController.text.trim();
+                    if (title.isEmpty || message.isEmpty) return;
+                    Navigator.of(dialogContext).pop(
+                      _CustomReminderInput(
+                        title: title,
+                        message: message,
+                        allDay: allDay,
+                        startHour: startHour,
+                        endHour: endHour,
+                        intervalHours: intervalHours,
+                      ),
+                    );
+                  },
+                  child: const Text('Save'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     final settings = _settings;
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('🔔 Reminders'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.science_outlined),
-            tooltip: 'Send test notification',
-            onPressed: () async {
-              await _notifications.showTestNotification();
-              if (context.mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Test notification sent 🧪')),
-                );
-              }
-            },
-          ),
-        ],
-      ),
+      appBar: AppBar(title: const Text('🔔 Reminders')),
       body: settings == null
           ? const Center(child: CircularProgressIndicator())
           : ListView(
@@ -159,6 +323,14 @@ class _HomeScreenState extends State<HomeScreen> {
                 _buildWaterCard(settings),
                 const SizedBox(height: 16),
                 _buildAffirmationCard(settings),
+                const SizedBox(height: 16),
+                ..._customReminders.map(_buildCustomReminderCard),
+                const SizedBox(height: 8),
+                OutlinedButton.icon(
+                  onPressed: _addCustomReminder,
+                  icon: const Icon(Icons.add),
+                  label: const Text('Add custom reminder'),
+                ),
               ],
             ),
     );
@@ -179,6 +351,12 @@ class _HomeScreenState extends State<HomeScreen> {
                   child: Text('Water reminders',
                       style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
                 ),
+                IconButton(
+                  icon: const Icon(Icons.science_outlined),
+                  tooltip: 'Send test notification',
+                  onPressed: () =>
+                      _fireTest(_notifications.showTestWaterNotification),
+                ),
                 Switch(
                   value: settings.waterEnabled,
                   onChanged: _onWaterToggled,
@@ -186,73 +364,29 @@ class _HomeScreenState extends State<HomeScreen> {
               ],
             ),
             const SizedBox(height: 12),
-            Row(
-              children: [
-                const Text('Every'),
-                const SizedBox(width: 8),
-                DropdownButton<int>(
-                  value: settings.waterIntervalHours,
-                  items: _intervalOptions
-                      .map((h) => DropdownMenuItem(value: h, child: Text('$h hr')))
-                      .toList(),
-                  onChanged: settings.waterEnabled
-                      ? (value) {
-                          if (value == null) return;
-                          setState(() => settings.waterIntervalHours = value);
-                          _onWaterConfigChanged();
-                        }
-                      : null,
-                ),
-              ],
+            IntervalScheduleEditor(
+              enabled: settings.waterEnabled,
+              allDay: settings.waterAllDay,
+              startHour: settings.waterStartHour,
+              endHour: settings.waterEndHour,
+              intervalHours: settings.waterIntervalHours,
+              onAllDayChanged: (value) {
+                setState(() => settings.waterAllDay = value);
+                _onWaterConfigChanged();
+              },
+              onStartHourChanged: (value) {
+                setState(() => settings.waterStartHour = value);
+                _onWaterConfigChanged();
+              },
+              onEndHourChanged: (value) {
+                setState(() => settings.waterEndHour = value);
+                _onWaterConfigChanged();
+              },
+              onIntervalHoursChanged: (value) {
+                setState(() => settings.waterIntervalHours = value);
+                _onWaterConfigChanged();
+              },
             ),
-            CheckboxListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('All day (00:00–23:59)'),
-              value: settings.waterAllDay,
-              onChanged: settings.waterEnabled
-                  ? (value) {
-                      if (value == null) return;
-                      setState(() => settings.waterAllDay = value);
-                      _onWaterConfigChanged();
-                    }
-                  : null,
-            ),
-            if (!settings.waterAllDay)
-              Row(
-                children: [
-                  const Text('from'),
-                  const SizedBox(width: 8),
-                  DropdownButton<int>(
-                    value: settings.waterStartHour,
-                    items: List.generate(24, (h) => h)
-                        .map((h) => DropdownMenuItem(value: h, child: Text('$h:00')))
-                        .toList(),
-                    onChanged: settings.waterEnabled
-                        ? (value) {
-                            if (value == null) return;
-                            setState(() => settings.waterStartHour = value);
-                            _onWaterConfigChanged();
-                          }
-                        : null,
-                  ),
-                  const SizedBox(width: 8),
-                  const Text('to'),
-                  const SizedBox(width: 8),
-                  DropdownButton<int>(
-                    value: settings.waterEndHour,
-                    items: List.generate(24, (h) => h)
-                        .map((h) => DropdownMenuItem(value: h, child: Text('$h:00')))
-                        .toList(),
-                    onChanged: settings.waterEnabled
-                        ? (value) {
-                            if (value == null) return;
-                            setState(() => settings.waterEndHour = value);
-                            _onWaterConfigChanged();
-                          }
-                        : null,
-                  ),
-                ],
-              ),
           ],
         ),
       ),
@@ -260,9 +394,6 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildAffirmationCard(ReminderSettings settings) {
-    final timeLabel = TimeOfDay(
-            hour: settings.affirmationHour, minute: settings.affirmationMinute)
-        .format(context);
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -274,8 +405,14 @@ class _HomeScreenState extends State<HomeScreen> {
                 const Text('✨', style: TextStyle(fontSize: 24)),
                 const SizedBox(width: 8),
                 const Expanded(
-                  child: Text('Daily affirmation',
+                  child: Text('Daily affirmations',
                       style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.science_outlined),
+                  tooltip: 'Send test notification',
+                  onPressed: () =>
+                      _fireTest(_notifications.showTestAffirmationNotification),
                 ),
                 Switch(
                   value: settings.affirmationEnabled,
@@ -284,19 +421,119 @@ class _HomeScreenState extends State<HomeScreen> {
               ],
             ),
             const SizedBox(height: 12),
-            Row(
-              children: [
-                const Text('At'),
-                const SizedBox(width: 8),
-                TextButton(
-                  onPressed: settings.affirmationEnabled ? _pickAffirmationTime : null,
-                  child: Text(timeLabel),
-                ),
-              ],
+            IntervalScheduleEditor(
+              enabled: settings.affirmationEnabled,
+              allDay: settings.affirmationAllDay,
+              startHour: settings.affirmationStartHour,
+              endHour: settings.affirmationEndHour,
+              intervalHours: settings.affirmationIntervalHours,
+              onAllDayChanged: (value) {
+                setState(() => settings.affirmationAllDay = value);
+                _onAffirmationConfigChanged();
+              },
+              onStartHourChanged: (value) {
+                setState(() => settings.affirmationStartHour = value);
+                _onAffirmationConfigChanged();
+              },
+              onEndHourChanged: (value) {
+                setState(() => settings.affirmationEndHour = value);
+                _onAffirmationConfigChanged();
+              },
+              onIntervalHoursChanged: (value) {
+                setState(() => settings.affirmationIntervalHours = value);
+                _onAffirmationConfigChanged();
+              },
             ),
           ],
         ),
       ),
     );
   }
+
+  Widget _buildCustomReminderCard(CustomReminder reminder) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Card(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(reminder.title,
+                        style: const TextStyle(
+                            fontSize: 18, fontWeight: FontWeight.bold)),
+                  ),
+                  Switch(
+                    value: reminder.enabled,
+                    onChanged: (value) => _toggleCustomReminder(reminder, value),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Text(reminder.message),
+              const SizedBox(height: 4),
+              Text(
+                _scheduleSummary(
+                  allDay: reminder.allDay,
+                  startHour: reminder.startHour,
+                  endHour: reminder.endHour,
+                  intervalHours: reminder.intervalHours,
+                ),
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+              Align(
+                alignment: Alignment.centerRight,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.science_outlined),
+                      tooltip: 'Send test notification',
+                      onPressed: () => _fireTest(
+                        () => _notifications.showTestCustomNotification(
+                          title: reminder.title,
+                          message: reminder.message,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.edit_outlined),
+                      tooltip: 'Edit',
+                      onPressed: () => _editCustomReminder(reminder),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.delete_outline),
+                      tooltip: 'Delete',
+                      onPressed: () => _deleteCustomReminder(reminder),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CustomReminderInput {
+  final String title;
+  final String message;
+  final bool allDay;
+  final int startHour;
+  final int endHour;
+  final int intervalHours;
+
+  _CustomReminderInput({
+    required this.title,
+    required this.message,
+    required this.allDay,
+    required this.startHour,
+    required this.endHour,
+    required this.intervalHours,
+  });
 }
