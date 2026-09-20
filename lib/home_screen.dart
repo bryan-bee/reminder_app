@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'custom_reminder.dart';
@@ -351,12 +352,13 @@ class _HomeScreenState extends State<HomeScreen> {
                   child: Text('Water reminders',
                       style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
                 ),
-                IconButton(
-                  icon: const Icon(Icons.science_outlined),
-                  tooltip: 'Send test notification',
-                  onPressed: () =>
-                      _fireTest(_notifications.showTestWaterNotification),
-                ),
+                if (kDebugMode)
+                  IconButton(
+                    icon: const Icon(Icons.science_outlined),
+                    tooltip: 'Send test notification',
+                    onPressed: () =>
+                        _fireTest(_notifications.showTestWaterNotification),
+                  ),
                 Switch(
                   value: settings.waterEnabled,
                   onChanged: _onWaterToggled,
@@ -408,12 +410,13 @@ class _HomeScreenState extends State<HomeScreen> {
                   child: Text('Daily affirmations',
                       style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
                 ),
-                IconButton(
-                  icon: const Icon(Icons.science_outlined),
-                  tooltip: 'Send test notification',
-                  onPressed: () =>
-                      _fireTest(_notifications.showTestAffirmationNotification),
-                ),
+                if (kDebugMode)
+                  IconButton(
+                    icon: const Icon(Icons.science_outlined),
+                    tooltip: 'Send test notification',
+                    onPressed: () => _fireTest(
+                        _notifications.showTestAffirmationNotification),
+                  ),
                 Switch(
                   value: settings.affirmationEnabled,
                   onChanged: _onAffirmationToggled,
@@ -489,16 +492,17 @@ class _HomeScreenState extends State<HomeScreen> {
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    IconButton(
-                      icon: const Icon(Icons.science_outlined),
-                      tooltip: 'Send test notification',
-                      onPressed: () => _fireTest(
-                        () => _notifications.showTestCustomNotification(
-                          title: reminder.title,
-                          message: reminder.message,
+                    if (kDebugMode)
+                      IconButton(
+                        icon: const Icon(Icons.science_outlined),
+                        tooltip: 'Send test notification',
+                        onPressed: () => _fireTest(
+                          () => _notifications.showTestCustomNotification(
+                            title: reminder.title,
+                            message: reminder.message,
+                          ),
                         ),
                       ),
-                    ),
                     IconButton(
                       icon: const Icon(Icons.edit_outlined),
                       tooltip: 'Edit',
